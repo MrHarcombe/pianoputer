@@ -6,7 +6,15 @@ import numpy as np
 import pygame
 import sys
 import warnings
+import RPi.GPIO as GPIO
+import time
 
+TRIG = 23
+ECHO = 24
+
+def round_to_nearest(n, m):
+    r = n % m
+    return n + m - r if r + r >= m else n - r
 
 def speedx(snd_array, factor):
     """ Speeds up / slows down a sound, by some factor. """
@@ -73,53 +81,104 @@ def parse_arguments():
 
     return (parser.parse_args(), parser)
 
+def get_sensor_distance():
+        """
+        The HC-SR04 sensor requires a short 10uS pulse to trigger the module,
+        which will cause the sensor to start the ranging program (8 ultrasound
+        bursts at 40 kHz) in order to obtain an echo response. So, to create
+        our trigger pulse, we set out trigger pin high for 10uS then set it
+        low again.
+        """
+
+        GPIO.output(TRIG, True)
+        time.sleep(0.00001)
+        GPIO.output(TRIG, False)
+
+        """
+        Our first step must therefore be to record the last low timestamp for
+        ECHO (pulse_start) e.g. just before the return signal is received and
+        the pin goes high.
+        """
+
+        while GPIO.input(ECHO)==0:
+          continue
+        pulse_start = time.time()
+
+        """
+        Once a signal is received, the value changes from low (0) to high (1),
+        and the signal will remain high for the duration of the echo pulse. We
+        therefore also need the last high timestamp for ECHO (pulse_end).
+        """
+
+        while GPIO.input(ECHO)==1:
+          continue
+        pulse_end = time.time()      
+
+        """
+        We can now calculate the difference between the two recorded timestamps,
+        and hence the duration of pulse (pulse_duration), which leads to the
+        distance in cm.
+        """
+
+        pulse_duration = pulse_end - pulse_start
+        distance = pulse_duration * 17150
+        distance = round(distance, 0)
+        time.sleep(0.01)
+
+        return distance
 
 def main():
-    # Parse command line arguments
-    (args, parser) = parse_arguments()
+    GPIO.setmode(GPIO.BCM)
 
-    # Enable warnings from scipy if requested
-    if not args.verbose:
-        warnings.simplefilter('ignore')
+    GPIO.setup(TRIG,GPIO.OUT)
+    GPIO.setup(ECHO,GPIO.IN)
 
-    fps, sound = wavfile.read(args.wav.name)
+    try:
+        # Reset the trigger pin to "low"
+        GPIO.output(TRIG, False)
 
-    tones = range(-25, 25)
-    sys.stdout.write('Transponding sound file... ')
-    sys.stdout.flush()
-    transposed_sounds = [pitchshift(sound, n) for n in tones]
-    print('DONE')
+        print "Sensor initialised..."
+        distance = 0
 
-    # So flexible ;)
-    pygame.mixer.init(fps, -16, 1, 2048)
-    # For the focus
-    screen = pygame.display.set_mode((150, 150))
+        # Parse command line arguments
+        (args, parser) = parse_arguments()
 
-    keys = args.keyboard.read().split('\n')
-    sounds = map(pygame.sndarray.make_sound, transposed_sounds)
-    key_sound = dict(zip(keys, sounds))
-    is_playing = {k: False for k in keys}
+        # Enable warnings from scipy if requested
+        if not args.verbose:
+            warnings.simplefilter('ignore')
 
-    while True:
-        event = pygame.event.wait()
+        fps, sound = wavfile.read(args.wav.name)
 
-        if event.type in (pygame.KEYDOWN, pygame.KEYUP):
-            key = pygame.key.name(event.key)
+        tones = range(-30, 20)
+        print('Transponding sound file... ')
+        transposed_sounds = [pitchshift(sound, n) for n in tones]
+        print('DONE')
 
-        if event.type == pygame.KEYDOWN:
-            if (key in key_sound.keys()) and (not is_playing[key]):
-                key_sound[key].play(fade_ms=50)
-                is_playing[key] = True
+        # So flexible ;)
+        pygame.mixer.init(fps, -16, 1, 2048)
 
-            elif event.key == pygame.K_ESCAPE:
-                pygame.quit()
-                raise KeyboardInterrupt
+        distances = range(5, 255, 5)
+        sounds = map(pygame.sndarray.make_sound, transposed_sounds)
+        distance_sound = dict(zip(distances, sounds))
+        is_playing = {d: False for d in distances}
 
-        elif event.type == pygame.KEYUP and key in key_sound.keys():
-            # Stops with 50ms fadeout
-            key_sound[key].fadeout(50)
-            is_playing[key] = False
+        while True:
+            # remember where we were, then detect where we are
+            previous_distance = distance
+            distance = round_to_nearest(get_sensor_distance(), 5)
 
+            # stop the previous sound, if different
+            if previous_distance != distance and previous_distance in is_playing and is_playing[previous_distance]:
+                distance_sound[previous_distance].fadeout(50)
+                is_playing[previous_distance] = False
+
+            # start the new sound, if valid
+            elif distance in is_playing and not is_playing[distance]:
+                distance_sound[distance].play(-1,fade_ms=50)
+                is_playing[distance] = True
+                
+    finally:
+        GPIO.cleanup()
 
 if __name__ == '__main__':
     try:
